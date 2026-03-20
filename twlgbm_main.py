@@ -97,6 +97,7 @@ def _run_pls_path(
     run_cv: bool,
     compute_shap: bool,
     thresholds: dict,
+    recent_fraction: float = 1.0,
 ) -> dict:
     """Run PLS regularization -> TWLGBM pipeline."""
     logger.info("\n" + "=" * 70)
@@ -107,6 +108,7 @@ def _run_pls_path(
     logger.info("  Applying PLS regression per feature category...")
     ds_pls, pls_feat_cols, pls_info = apply_pls_by_category(
         dataset, feature_cols, col_to_category,
+        recent_fraction=recent_fraction,
     )
     logger.info(f"  Features after PLS: {len(pls_feat_cols)}")
 
@@ -171,6 +173,7 @@ def _run_horseshoe_path(
     run_cv: bool,
     compute_shap: bool,
     thresholds: dict,
+    recent_fraction: float = 1.0,
 ) -> dict:
     """Run Horseshoe shrinkage + correlation clustering -> TWLGBM pipeline."""
     logger.info("\n" + "=" * 70)
@@ -181,6 +184,7 @@ def _run_horseshoe_path(
     logger.info("  Applying Horseshoe prior shrinkage...")
     ds_hs, hs_feat_cols, horseshoe_weights = apply_horseshoe_shrinkage(
         dataset, feature_cols,
+        recent_fraction=recent_fraction,
     )
     logger.info(f"  Features after horseshoe: {len(hs_feat_cols)}")
 
@@ -433,6 +437,7 @@ def run(
     compute_shap: bool = True,
     metrics_csv: str = "btc_glassnode_metrics.csv",
     anchor_day: str = DEFAULT_ANCHOR_DAY,
+    recent_fraction: float = 1.0,
 ) -> dict:
     """
     Full TWLGBM pipeline with both PLS and Horseshoe regularization paths.
@@ -449,6 +454,9 @@ def run(
     anchor_day : str
         Day of week for data alignment and return computation:
         "thursday" (default), "friday", or "monday".
+    recent_fraction : float
+        Fraction of data (most recent) to use for PLS/Horseshoe fitting.
+        Default 1.0 uses all data. E.g. 0.5 fits on the most recent half.
 
     Returns dict with pls_result, hs_result, thresholds, dataset.
     """
@@ -484,6 +492,7 @@ def run(
     pls_result = _run_pls_path(
         dataset, feature_cols, col_to_category,
         run_cv=run_cv, compute_shap=compute_shap, thresholds=thresholds,
+        recent_fraction=recent_fraction,
     )
 
     gc.collect()
@@ -493,6 +502,7 @@ def run(
     hs_result = _run_horseshoe_path(
         dataset, feature_cols, col_to_category,
         run_cv=run_cv, compute_shap=compute_shap, thresholds=thresholds,
+        recent_fraction=recent_fraction,
     )
 
     gc.collect()
@@ -575,13 +585,20 @@ def main():
         help="Path to Glassnode metrics CSV",
     )
     parser.add_argument(
-        "--anchor-day", default=DEFAULT_ANCHOR_DAY,
+        "--anchor-day", default = 'thursday',   #default=DEFAULT_ANCHOR_DAY,
         choices=list(ANCHOR_DAY_WEEKDAY.keys()),
         help=(
             "Anchor day for weekly data alignment and return computation. "
             "'thursday' (default, run Fri 3AM UTC), "
             "'friday' (run Sat 4AM UTC), "
             "'monday' (run Tue 4AM UTC)"
+        ),
+    )
+    parser.add_argument(
+        "--recent-fraction", type=float, default=0.5,
+        help=(
+            "Fraction of data (most recent) to use for PLS/Horseshoe fitting. "
+            "Default 1.0 uses all data. E.g. 0.5 fits on the most recent half."
         ),
     )
 
@@ -595,9 +612,10 @@ def main():
         compute_shap=not args.no_shap,
         metrics_csv=args.metrics_csv,
         anchor_day=args.anchor_day,
+        recent_fraction=args.recent_fraction,
     )
 
-    logger.info(f"\nDone. Report: {result['report_path']}")
+    logger.info(f"\nDone. Reports: {result['pls_report_path']}, {result['hs_report_path']}")
 
 
 if __name__ == "__main__":

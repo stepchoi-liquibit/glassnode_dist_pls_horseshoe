@@ -370,9 +370,9 @@ def _daily_to_weekly(
     for part in weekly_parts[1:]:
         weekly = weekly.merge(part, on="date_dt", how="outer")
 
-    # Align to requested Thursdays
+    # Align to requested anchor dates
     weekly = weekly.sort_values("date_dt")
-    thu_df = pd.DataFrame({"date_dt": thursday_dates}).sort_values("date_dt")
+    thu_df = pd.DataFrame({"date_dt": anchor_dates}).sort_values("date_dt")
     aligned = pd.merge_asof(thu_df, weekly, on="date_dt", direction="backward")
 
     # Apply stationarity: difference non-ratio metrics

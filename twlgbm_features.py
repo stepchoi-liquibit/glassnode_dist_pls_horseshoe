@@ -266,6 +266,7 @@ def apply_pls_by_category(
     max_components: int = PLS_MAX_COMPONENTS,
     cv_folds: int = PLS_CV_FOLDS,
     min_features: int = PLS_MIN_FEATURES,
+    recent_fraction: float = 1.0,
 ) -> tuple[pd.DataFrame, list[str], dict]:
     """
     Replace raw features with PLS scores, one PLS per feature category.
@@ -278,6 +279,13 @@ def apply_pls_by_category(
 
     Features not belonging to any category (interaction terms, lagged
     bucket labels, cross-horizon return features) are kept as-is.
+
+    Parameters
+    ----------
+    recent_fraction : float
+        Fraction of data (most recent) to use for PLS fitting (CV + final fit).
+        Default 1.0 uses all data. E.g. 0.5 fits PLS on the most recent half
+        but still transforms all rows.
     """
     df = df.copy()
 
@@ -300,6 +308,9 @@ def apply_pls_by_category(
     pls_score_cols: list[str] = []
     pls_info: dict[str, dict] = {}
 
+    if recent_fraction < 1.0:
+        logger.info(f"  PLS: using most recent {recent_fraction:.0%} of data for fitting")
+
     for cat in sorted(groups.keys()):
         cols = groups[cat]
         if len(cols) < min_features:
@@ -317,8 +328,20 @@ def apply_pls_by_category(
         X_scaled = scaler.fit_transform(X_all)
 
         valid_mask = df[ret_cols].notna().all(axis=1).values
-        X_fit = X_scaled[valid_mask]
-        Y_fit = df.loc[valid_mask, ret_cols].values.astype(np.float64)
+
+        # Apply recent_fraction: restrict fitting window to most recent portion
+        if recent_fraction < 1.0:
+            n_total = int(valid_mask.sum())
+            n_recent = max(cv_folds * 5, int(n_total * recent_fraction))
+            # Build a mask that is True only for the last n_recent valid rows
+            valid_indices = np.where(valid_mask)[0]
+            fit_indices = set(valid_indices[-n_recent:])
+            fit_mask = np.array([i in fit_indices for i in range(len(valid_mask))])
+        else:
+            fit_mask = valid_mask
+
+        X_fit = X_scaled[fit_mask]
+        Y_fit = df.loc[fit_mask, ret_cols].values.astype(np.float64)
 
         if X_fit.shape[0] < cv_folds * 5:
             logger.info(f"  PLS skip {cat}: too few valid rows ({X_fit.shape[0]})")
@@ -351,6 +374,7 @@ def apply_pls_by_category(
 
         pls = PLSRegression(n_components=best_n)
         pls.fit(X_fit, Y_fit)
+        # Transform ALL rows (not just the fit window)
         X_scores = pls.transform(X_scaled)
 
         score_names = [f"{cat}_pls{i + 1}" for i in range(best_n)]
@@ -392,6 +416,7 @@ def apply_horseshoe_shrinkage(
     feature_cols: list[str],
     expected_sparsity: float = HORSESHOE_EXPECTED_SPARSITY,
     weight_floor: float = HORSESHOE_WEIGHT_FLOOR,
+    recent_fraction: float = 1.0,
 ) -> tuple[pd.DataFrame, list[str], pd.Series]:
     """
     Apply Horseshoe prior shrinkage to all feature columns before LGBM.
@@ -408,6 +433,13 @@ def apply_horseshoe_shrinkage(
     Features with strong signal get w_j ~ 1 (preserved); noisy features
     get w_j ~ 0 (shrunk toward zero).  Features below ``weight_floor``
     are dropped entirely.
+
+    Parameters
+    ----------
+    recent_fraction : float
+        Fraction of data (most recent) to use for computing signal scores.
+        Default 1.0 uses all data. E.g. 0.5 computes correlations on the
+        most recent half only, but applies shrinkage decisions to all rows.
     """
     df = df.copy()
     label_cols = [f"label_{h}" for h in HORIZON_WEEKS if f"label_{h}" in df.columns]
@@ -429,23 +461,36 @@ def apply_horseshoe_shrinkage(
     stds[stds < 1e-10] = 1.0
     X_std = (X - means) / stds
 
+    # Apply recent_fraction: restrict signal scoring to most recent portion
+    if recent_fraction < 1.0:
+        n_recent = max(30, int(n_rows * recent_fraction))
+        fit_start = n_rows - n_recent
+        logger.info(
+            f"  Horseshoe: using most recent {recent_fraction:.0%} of data "
+            f"({n_recent}/{n_rows} rows) for signal scoring"
+        )
+    else:
+        fit_start = 0
+
     max_abs_z = np.zeros(p, dtype=np.float64)
 
     for lcol in label_cols:
         y = df[lcol].values.astype(np.float64)
-        valid = ~np.isnan(y)
+        # Restrict to recent window
+        y_window = y[fit_start:]
+        valid = ~np.isnan(y_window)
         n_valid = valid.sum()
         if n_valid < 30:
             continue
 
-        y_clean = y[valid]
+        y_clean = y_window[valid]
         y_mean = y_clean.mean()
         y_std = y_clean.std()
         if y_std < 1e-10:
             continue
         y_normed = (y_clean - y_mean) / y_std
 
-        X_valid = X_std[valid]
+        X_valid = X_std[fit_start:][valid]
         abs_corr = np.abs(X_valid.T @ y_normed) / n_valid
         z_scores = abs_corr * np.sqrt(n_valid)
         max_abs_z = np.maximum(max_abs_z, z_scores)
